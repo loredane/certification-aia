@@ -4,12 +4,18 @@
 
 ---
 
-## Projet : Final Project — Pipeline MLOps
+## Projet : Mezonya ML — Pipeline MLOps
 
-### Contexte
-Ce projet final teste la capacité à gérer de bout en bout le cycle de vie d'un modèle de Machine Learning : de l'ingestion et la préparation des données, à l'entraînement, au déploiement, au monitoring et au réentraînement automatique — le tout dans un pipeline scalable et automatisé qui fonctionne dans des conditions réelles. Le périmètre est libre : choix autonome du dataset et du cas d'usage.
+Le projet Mezonya ML est développé dans un repository dédié :
 
-### Objectif
+**Repository GitHub :** https://github.com/loredane/mezonya-ml
+
+---
+
+## Contexte
+Ce projet final teste la capacité à gérer de bout en bout le cycle de vie d'un modèle de Machine Learning : de l'ingestion et la préparation des données, à l'entraînement, au déploiement, au monitoring et au réentraînement automatique — le tout dans un pipeline scalable et automatisé qui fonctionne dans des conditions réelles.
+
+## Objectif
 Développer un pipeline MLOps entièrement fonctionnel qui automatise l'intégralité du cycle de vie d'un modèle de ML : training, déploiement via API, CI/CD, monitoring avec détection de drift, réentraînement automatique, versioning, et rollback.
 
 ---
