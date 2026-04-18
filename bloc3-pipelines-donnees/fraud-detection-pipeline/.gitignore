@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.env
+data/
+models/
+logs/
+*.csv
+mlruns/
+.DS_Store
