@@ -1,0 +1,13 @@
+stripe_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: postgres
+      user: stripe
+      password: stripe_pwd
+      port: 5432
+      dbname: stripe_oltp
+      schema: analytics
+      threads: 4
+      keepalives_idle: 0
