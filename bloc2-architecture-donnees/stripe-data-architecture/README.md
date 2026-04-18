@@ -85,19 +85,6 @@ stripe-data-architecture/
 - **Surveillance performances** → Prometheus + 2 dashboards Grafana
 - **Documentation accessible** → Markdown hiérarchisé, alt-texts SVG, pas d'info uniquement par couleur
 
-## Publier sur GitHub
-
-```bash
-unzip stripe-data-architecture.zip
-cd stripe-data-architecture
-
-git init
-git add .
-git commit -m "Initial commit : Stripe Data Architecture Bloc 2 AIA"
-
-git branch -M main
-git remote add origin https://github.com/<ton-user>/stripe-data-architecture.git
-git push -u origin main
 ```
 
 ## Licence
