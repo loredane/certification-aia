@@ -17,7 +17,6 @@ Endpoints :
 
 DAMA-DMBOK2 ch.14 §2.2 — Big Data & Data Science
 """
-from __future__ import annotations
 
 import json
 import logging

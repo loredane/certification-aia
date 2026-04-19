@@ -51,7 +51,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-      - ./docker/postgres/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+      # - ./docker/postgres/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stripe_app} -d ${POSTGRES_DB:-stripe_oltp}"]
       interval: 10s
@@ -93,7 +93,7 @@ services:
     volumes:
       - mongo_data:/data/db
       # FIX v3-mediums #5 : script shell (lit MONGO_APP_PASSWORD) au lieu d'un .js
-      - ./docker/mongo/init-mongo.sh:/docker-entrypoint-initdb.d/init-mongo.sh:ro
+# - ./docker/mongo/init-mongo.sh:/docker-entrypoint-initdb.d/init-mongo.sh:ro
     healthcheck:
       # FIX v3-hauts: forme CMD-SHELL explicite + grep pour ne pas dépendre
       # d'une sortie exacte. Corrige le quoting fragile de la forme plain-scalar.
@@ -434,8 +434,8 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
+      # kafka:
+      #   condition: service_healthy
     healthcheck:
       # FIX v3: healthcheck Compose-level (en plus de celui du Dockerfile)
       # permet aux autres services d'utiliser condition: service_healthy
