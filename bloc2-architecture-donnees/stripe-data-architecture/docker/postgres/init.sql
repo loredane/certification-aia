@@ -1,240 +1,224 @@
 -- =============================================================================
--- Stripe OLTP Schema — PostgreSQL 16
--- Modèle 3NF normalisé (DAMA-DMBOK2 ch.5 §1.3.5)
--- ACID, WAL logique pour CDC, partitioning, RBAC, audit append-only
+-- Stripe OLTP — PostgreSQL 3NF Schema
+-- DAMA-DMBOK2 ch.5 §1.3.3 — Relational Data Modeling (3NF normalization)
 -- =============================================================================
 
 -- Extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- =============================================================================
--- SCHEMAS (séparation logique)
--- =============================================================================
-CREATE SCHEMA IF NOT EXISTS core;      -- Entités métier
-CREATE SCHEMA IF NOT EXISTS reference; -- Données référentielles
-CREATE SCHEMA IF NOT EXISTS audit;     -- Traçabilité (DAMA ch.7 §1.3.2)
+-- Schemas
+CREATE SCHEMA IF NOT EXISTS core;      -- Business domain
+CREATE SCHEMA IF NOT EXISTS reference; -- Reference data
+CREATE SCHEMA IF NOT EXISTS audit;     -- Audit logs (PCI-DSS)
 
 -- =============================================================================
--- REFERENCE DATA (slow-changing)
+-- REFERENCE DATA (quasi-static)
 -- =============================================================================
-CREATE TABLE reference.country (
-    country_code CHAR(2) PRIMARY KEY,
-    country_name VARCHAR(100) NOT NULL,
-    region       VARCHAR(50),
-    is_eu        BOOLEAN NOT NULL DEFAULT FALSE
+
+CREATE TABLE reference.countries (
+    country_code    CHAR(2) PRIMARY KEY,
+    country_name    VARCHAR(100) NOT NULL,
+    region          VARCHAR(50) NOT NULL,
+    is_high_risk    BOOLEAN DEFAULT FALSE,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE reference.currency (
-    currency_code CHAR(3) PRIMARY KEY,
-    currency_name VARCHAR(50) NOT NULL,
-    decimals      SMALLINT NOT NULL DEFAULT 2
+CREATE TABLE reference.currencies (
+    currency_code   CHAR(3) PRIMARY KEY,
+    currency_name   VARCHAR(50) NOT NULL,
+    decimal_places  SMALLINT NOT NULL DEFAULT 2,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE reference.exchange_rate (
-    exchange_rate_id UUID DEFAULT uuid_generate_v4(),
-    from_currency    CHAR(3) NOT NULL REFERENCES reference.currency(currency_code),
-    to_currency      CHAR(3) NOT NULL REFERENCES reference.currency(currency_code),
-    rate             NUMERIC(15,6) NOT NULL CHECK (rate > 0),
-    effective_date   DATE NOT NULL,
-    PRIMARY KEY (exchange_rate_id),
+CREATE TABLE reference.exchange_rates (
+    rate_id         BIGSERIAL PRIMARY KEY,
+    from_currency   CHAR(3) NOT NULL REFERENCES reference.currencies(currency_code),
+    to_currency     CHAR(3) NOT NULL REFERENCES reference.currencies(currency_code),
+    rate            NUMERIC(18,8) NOT NULL,
+    effective_date  DATE NOT NULL,
     UNIQUE (from_currency, to_currency, effective_date)
 );
+CREATE INDEX idx_fx_effective ON reference.exchange_rates(effective_date);
 
-CREATE TABLE reference.payment_method_type (
-    payment_method_type_id SERIAL PRIMARY KEY,
-    type_code VARCHAR(30) UNIQUE NOT NULL,  -- card, sepa, ach, wallet...
-    type_name VARCHAR(100) NOT NULL
+CREATE TABLE reference.mcc_codes (
+    mcc_code        VARCHAR(4) PRIMARY KEY,
+    description     VARCHAR(200) NOT NULL,
+    category        VARCHAR(100)
 );
 
 -- =============================================================================
--- CORE — CUSTOMERS
+-- CUSTOMERS
 -- =============================================================================
-CREATE TABLE core.customer (
+
+CREATE TABLE core.customers (
     customer_id     UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email           VARCHAR(255) NOT NULL UNIQUE,
+    email_hash      VARCHAR(64) NOT NULL,  -- SHA-256 for GDPR pseudonymization
     first_name      VARCHAR(100),
     last_name       VARCHAR(100),
-    country_code    CHAR(2) NOT NULL REFERENCES reference.country(country_code),
+    phone_encrypted BYTEA,  -- AES-256 encrypted
+    country_code    CHAR(2) REFERENCES reference.countries(country_code),
+    kyc_status      VARCHAR(20) DEFAULT 'pending'
+                     CHECK (kyc_status IN ('pending','verified','rejected','suspended')),
+    risk_score      NUMERIC(5,4) DEFAULT 0.0,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ,  -- Soft delete for GDPR right to be forgotten
+    CONSTRAINT risk_score_range CHECK (risk_score BETWEEN 0 AND 1)
+);
+CREATE INDEX idx_customers_email_hash ON core.customers(email_hash);
+CREATE INDEX idx_customers_country ON core.customers(country_code);
+CREATE INDEX idx_customers_created ON core.customers(created_at DESC);
+
+-- =============================================================================
+-- MERCHANTS
+-- =============================================================================
+
+CREATE TABLE core.merchants (
+    merchant_id     UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    business_name   VARCHAR(255) NOT NULL,
+    business_type   VARCHAR(50) NOT NULL
+                     CHECK (business_type IN ('company','individual','nonprofit','government')),
+    mcc_code        VARCHAR(4) REFERENCES reference.mcc_codes(mcc_code),
+    country_code    CHAR(2) REFERENCES reference.countries(country_code),
+    status          VARCHAR(20) DEFAULT 'active'
+                     CHECK (status IN ('active','suspended','terminated')),
+    onboarded_at    TIMESTAMPTZ DEFAULT NOW(),
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX idx_merchants_country ON core.merchants(country_code);
+CREATE INDEX idx_merchants_mcc ON core.merchants(mcc_code);
+CREATE INDEX idx_merchants_status ON core.merchants(status);
+
+-- =============================================================================
+-- PAYMENT METHODS (tokenized for PCI-DSS)
+-- =============================================================================
+
+CREATE TABLE core.payment_methods (
+    payment_method_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    customer_id     UUID NOT NULL REFERENCES core.customers(customer_id) ON DELETE CASCADE,
+    type            VARCHAR(20) NOT NULL
+                     CHECK (type IN ('card','bank_account','wallet','crypto')),
+    card_brand      VARCHAR(20),    -- visa, mastercard, amex, etc.
+    last4           CHAR(4),        -- Only last 4 digits (PCI-DSS compliant)
+    exp_month       SMALLINT CHECK (exp_month BETWEEN 1 AND 12),
+    exp_year        SMALLINT,
+    token           VARCHAR(255) NOT NULL,  -- Vault token (card number never stored)
+    fingerprint     VARCHAR(64),            -- SHA-256 to identify duplicate cards
+    is_default      BOOLEAN DEFAULT FALSE,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ
+);
+CREATE INDEX idx_pm_customer ON core.payment_methods(customer_id);
+CREATE INDEX idx_pm_fingerprint ON core.payment_methods(fingerprint);
+
+-- =============================================================================
+-- TRANSACTIONS (table principale — high volume)
+-- =============================================================================
+
+CREATE TABLE core.transactions (
+    transaction_id  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    merchant_id     UUID NOT NULL REFERENCES core.merchants(merchant_id),
+    customer_id     UUID NOT NULL REFERENCES core.customers(customer_id),
+    payment_method_id UUID NOT NULL REFERENCES core.payment_methods(payment_method_id),
+    amount          NUMERIC(18,2) NOT NULL CHECK (amount > 0),
+    currency_code   CHAR(3) NOT NULL REFERENCES reference.currencies(currency_code),
+    amount_usd      NUMERIC(18,2),  -- Pre-calculé via trigger ou application
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending','authorized','captured','failed','refunded','disputed')),
+    failure_reason  VARCHAR(100),
+    ip_address      INET,
+    user_agent      TEXT,
+    device_type     VARCHAR(20) CHECK (device_type IN ('mobile','desktop','tablet','api','other')),
+    fraud_score     NUMERIC(5,4) DEFAULT 0.0 CHECK (fraud_score BETWEEN 0 AND 1),
+    is_3d_secure    BOOLEAN DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- GDPR (DAMA ch.7 §1.3.1) : soft delete via flag + timestamp d'anonymisation
-    is_deleted      BOOLEAN NOT NULL DEFAULT FALSE,
-    deleted_at      TIMESTAMPTZ,
-    CONSTRAINT chk_email CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_customer_country ON core.customer(country_code);
-CREATE INDEX idx_customer_created ON core.customer(created_at DESC);
+
+-- Indexes critiques (patterns d'accès attendus)
+CREATE INDEX idx_tx_merchant_created ON core.transactions(merchant_id, created_at DESC);
+CREATE INDEX idx_tx_customer_created ON core.transactions(customer_id, created_at DESC);
+CREATE INDEX idx_tx_status ON core.transactions(status) WHERE status IN ('pending','failed','disputed');
+CREATE INDEX idx_tx_created_brin ON core.transactions USING BRIN(created_at);  -- BRIN for time-series
+CREATE INDEX idx_tx_fraud ON core.transactions(fraud_score DESC) WHERE fraud_score > 0.5;
 
 -- =============================================================================
--- CORE — MERCHANTS
+-- REFUNDS & DISPUTES
 -- =============================================================================
-CREATE TABLE core.merchant (
-    merchant_id   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    business_name VARCHAR(200) NOT NULL,
-    mcc_code      CHAR(4),  -- Merchant Category Code (PCI-DSS)
-    country_code  CHAR(2) NOT NULL REFERENCES reference.country(country_code),
-    kyc_status    VARCHAR(20) NOT NULL DEFAULT 'pending'
-                  CHECK (kyc_status IN ('pending', 'verified', 'rejected')),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+
+CREATE TABLE core.refunds (
+    refund_id       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transaction_id  UUID NOT NULL REFERENCES core.transactions(transaction_id),
+    amount          NUMERIC(18,2) NOT NULL CHECK (amount > 0),
+    reason          VARCHAR(100),
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending','succeeded','failed')),
+    created_at      TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX idx_merchant_country ON core.merchant(country_code);
-CREATE INDEX idx_merchant_kyc ON core.merchant(kyc_status);
+CREATE INDEX idx_refunds_transaction ON core.refunds(transaction_id);
 
--- =============================================================================
--- CORE — PAYMENT METHODS (tokenisation PCI-DSS)
--- =============================================================================
-CREATE TABLE core.payment_method (
-    payment_method_id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    customer_id            UUID NOT NULL REFERENCES core.customer(customer_id),
-    payment_method_type_id INT NOT NULL REFERENCES reference.payment_method_type(payment_method_type_id),
-    -- Jamais de PAN en clair (PCI-DSS req. 3.4) — uniquement token + last4
-    token                  VARCHAR(255) NOT NULL UNIQUE,
-    last4                  CHAR(4),
-    brand                  VARCHAR(30),     -- visa, mastercard, amex...
-    exp_month              SMALLINT CHECK (exp_month BETWEEN 1 AND 12),
-    exp_year               SMALLINT CHECK (exp_year BETWEEN 2020 AND 2050),
-    is_default             BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE core.disputes (
+    dispute_id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transaction_id  UUID NOT NULL REFERENCES core.transactions(transaction_id),
+    amount          NUMERIC(18,2) NOT NULL,
+    reason          VARCHAR(50) NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'needs_response'
+                     CHECK (status IN ('needs_response','under_review','won','lost')),
+    evidence_url    TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at     TIMESTAMPTZ
 );
-CREATE INDEX idx_pm_customer ON core.payment_method(customer_id);
+CREATE INDEX idx_disputes_status ON core.disputes(status);
 
 -- =============================================================================
--- CORE — TRANSACTIONS (partitionnée par mois — DAMA ch.6 §2.3)
+-- AUDIT LOG (immutable, append-only — PCI-DSS Req. 10)
 -- =============================================================================
-CREATE TABLE core.transaction (
-    transaction_id    UUID DEFAULT uuid_generate_v4(),
-    merchant_id       UUID NOT NULL REFERENCES core.merchant(merchant_id),
-    customer_id       UUID NOT NULL REFERENCES core.customer(customer_id),
-    payment_method_id UUID NOT NULL REFERENCES core.payment_method(payment_method_id),
-    amount_minor      BIGINT NOT NULL CHECK (amount_minor > 0),  -- cents
-    currency_code     CHAR(3) NOT NULL REFERENCES reference.currency(currency_code),
-    status            VARCHAR(20) NOT NULL
-                      CHECK (status IN ('pending', 'succeeded', 'failed', 'refunded', 'disputed')),
-    fraud_score       NUMERIC(4,3) CHECK (fraud_score BETWEEN 0 AND 1),
-    fraud_decision    VARCHAR(20) CHECK (fraud_decision IN ('approve', 'review', 'decline')),
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (transaction_id, created_at)
-) PARTITION BY RANGE (created_at);
 
--- Partitions mensuelles
-CREATE TABLE core.transaction_2026_01 PARTITION OF core.transaction
-    FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
-CREATE TABLE core.transaction_2026_02 PARTITION OF core.transaction
-    FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
-CREATE TABLE core.transaction_2026_03 PARTITION OF core.transaction
-    FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
-CREATE TABLE core.transaction_2026_04 PARTITION OF core.transaction
-    FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
-CREATE TABLE core.transaction_2026_05 PARTITION OF core.transaction
-    FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
-CREATE TABLE core.transaction_default PARTITION OF core.transaction DEFAULT;
-
-CREATE INDEX idx_tx_merchant ON core.transaction(merchant_id, created_at DESC);
-CREATE INDEX idx_tx_customer ON core.transaction(customer_id, created_at DESC);
-CREATE INDEX idx_tx_status   ON core.transaction(status) WHERE status IN ('pending', 'disputed');
-CREATE INDEX idx_tx_fraud    ON core.transaction(fraud_score DESC) WHERE fraud_score > 0.7;
-
--- =============================================================================
--- CORE — REFUNDS & DISPUTES (entités liées aux transactions)
--- =============================================================================
-CREATE TABLE core.refund (
-    refund_id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    transaction_id UUID NOT NULL,
-    amount_minor   BIGINT NOT NULL CHECK (amount_minor > 0),
-    reason         VARCHAR(100),
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE audit.audit_log (
+    audit_id        BIGSERIAL PRIMARY KEY,
+    event_time      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    actor_type      VARCHAR(20) NOT NULL,  -- user, system, admin
+    actor_id        VARCHAR(100),
+    action          VARCHAR(50) NOT NULL,  -- SELECT, INSERT, UPDATE, DELETE, LOGIN, etc.
+    resource_type   VARCHAR(50),
+    resource_id     VARCHAR(100),
+    ip_address      INET,
+    success         BOOLEAN NOT NULL,
+    metadata        JSONB
 );
-CREATE INDEX idx_refund_tx ON core.refund(transaction_id);
+CREATE INDEX idx_audit_time ON audit.audit_log(event_time DESC);
+CREATE INDEX idx_audit_actor ON audit.audit_log(actor_id, event_time DESC);
+CREATE INDEX idx_audit_resource ON audit.audit_log(resource_type, resource_id);
 
-CREATE TABLE core.dispute (
-    dispute_id     UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    transaction_id UUID NOT NULL,
-    reason_code    VARCHAR(50),
-    status         VARCHAR(20) NOT NULL DEFAULT 'open'
-                   CHECK (status IN ('open', 'won', 'lost', 'withdrawn')),
-    evidence_due   DATE,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX idx_dispute_tx ON core.dispute(transaction_id);
-CREATE INDEX idx_dispute_status ON core.dispute(status);
+-- Revoke DELETE/UPDATE (append-only)
+REVOKE UPDATE, DELETE ON audit.audit_log FROM PUBLIC;
 
 -- =============================================================================
--- AUDIT — Append-only (DAMA ch.7 §1.3.2 + PCI-DSS req. 10)
+-- TRIGGERS — updated_at auto-refresh
 -- =============================================================================
-CREATE TABLE audit.access_log (
-    audit_id    BIGSERIAL PRIMARY KEY,
-    event_time  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    db_user     VARCHAR(100) NOT NULL,
-    action      VARCHAR(20) NOT NULL,     -- INSERT/UPDATE/DELETE/SELECT
-    table_name  VARCHAR(100) NOT NULL,
-    row_pk      TEXT,
-    old_values  JSONB,
-    new_values  JSONB,
-    client_ip   INET
-);
-CREATE INDEX idx_audit_time  ON audit.access_log(event_time DESC);
-CREATE INDEX idx_audit_user  ON audit.access_log(db_user, event_time DESC);
-CREATE INDEX idx_audit_table ON audit.access_log(table_name);
 
--- Trigger générique d'audit
-CREATE OR REPLACE FUNCTION audit.log_changes() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION touch_updated_at()
+RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO audit.access_log(db_user, action, table_name, row_pk, old_values, new_values)
-    VALUES (
-        current_user,
-        TG_OP,
-        TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME,
-        COALESCE((NEW)::text, (OLD)::text),
-        CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN row_to_json(OLD)::jsonb ELSE NULL END,
-        CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN row_to_json(NEW)::jsonb ELSE NULL END
-    );
-    RETURN COALESCE(NEW, OLD);
+    NEW.updated_at = NOW();
+    RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_audit_transaction
-    AFTER INSERT OR UPDATE OR DELETE ON core.transaction
-    FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
-
-CREATE TRIGGER trg_audit_customer
-    AFTER INSERT OR UPDATE OR DELETE ON core.customer
-    FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
-
--- =============================================================================
--- RBAC — Rôles applicatifs (DAMA ch.7 §1.3.4)
--- =============================================================================
-CREATE ROLE app_read;
-CREATE ROLE app_write;
-CREATE ROLE analytics_ro;
-
-GRANT USAGE ON SCHEMA core, reference TO app_read, app_write, analytics_ro;
-GRANT SELECT ON ALL TABLES IN SCHEMA core, reference TO app_read, analytics_ro;
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA core TO app_write;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA core TO app_write;
-
--- Interdiction de lire la table audit pour app_write
-REVOKE ALL ON SCHEMA audit FROM app_read, app_write;
-GRANT USAGE ON SCHEMA audit TO analytics_ro;
-GRANT SELECT ON ALL TABLES IN SCHEMA audit TO analytics_ro;
-
--- Utilisateur CDC pour Debezium (replication)
-CREATE USER debezium WITH REPLICATION ENCRYPTED PASSWORD 'debezium_pwd';
-GRANT USAGE ON SCHEMA core TO debezium;
-GRANT SELECT ON ALL TABLES IN SCHEMA core TO debezium;
-
--- Publication pour logical replication (CDC)
-CREATE PUBLICATION stripe_publication FOR TABLE
-    core.transaction, core.customer, core.merchant, core.payment_method;
+CREATE TRIGGER trg_customers_updated BEFORE UPDATE ON core.customers
+    FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_merchants_updated BEFORE UPDATE ON core.merchants
+    FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_transactions_updated BEFORE UPDATE ON core.transactions
+    FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 -- =============================================================================
--- VIEWS métier
+-- REPLICATION (logical — pour Airbyte CDC)
 -- =============================================================================
-CREATE OR REPLACE VIEW core.v_active_customer AS
-SELECT customer_id, email, first_name, last_name, country_code, created_at
-FROM core.customer
-WHERE is_deleted = FALSE;
 
-COMMENT ON SCHEMA core IS 'Entités métier transactionnelles (OLTP)';
-COMMENT ON SCHEMA reference IS 'Données référentielles slowly-changing';
-COMMENT ON SCHEMA audit IS 'Traçabilité append-only PCI-DSS req. 10';
+CREATE PUBLICATION stripe_publication FOR ALL TABLES;
+-- Slot de réplication créé par Airbyte via :
+-- SELECT pg_create_logical_replication_slot('airbyte_slot','pgoutput');

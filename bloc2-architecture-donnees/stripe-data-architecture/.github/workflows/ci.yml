@@ -1,0 +1,81 @@
+# =============================================================================
+# FIX v3-mediums #14 : CI GitHub Actions.
+# 4 jobs :
+#   1. validate-compose : docker compose config (lint YAML + resolution des env)
+#   2. dbt-parse        : dbt parse (syntaxe Jinja + SQL + refs + sources)
+#   3. python-syntax    : py_compile sur les DAGs + ml-service + scripts
+#   4. pytest-ml        : tests unitaires du ml-service
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  validate-compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dummy .env for compose resolution
+        run: cp .env.example .env
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+  dbt-parse:
+    name: dbt parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dbt-snowflake
+        run: pip install dbt-core==1.8.7 dbt-snowflake==1.8.4
+      - name: Fake Snowflake env (dbt parse only checks syntax)
+        run: |
+          echo "SNOWFLAKE_ACCOUNT=fake.account" >> $GITHUB_ENV
+          echo "SNOWFLAKE_USER=fake_user"      >> $GITHUB_ENV
+          echo "SNOWFLAKE_PASSWORD=fake_pw"    >> $GITHUB_ENV
+      - name: dbt deps + parse
+        working-directory: dbt/stripe_analytics
+        env:
+          DBT_PROFILES_DIR: ${{ github.workspace }}/dbt
+        run: |
+          dbt deps
+          dbt parse --target dev
+
+  python-syntax:
+    name: python py_compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile DAGs, ml-service, scripts
+        run: |
+          python -m py_compile airflow/dags/ingest_to_snowflake.py
+          python -m py_compile airflow/dags/transform_dbt.py
+          python -m py_compile airflow/dags/ml_fraud_scoring.py
+          python -m py_compile ml-service/app/main.py
+          python -m py_compile scripts/transaction-generator.py
+
+  pytest-ml:
+    name: pytest ml-service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ml-service deps
+        working-directory: ml-service
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        working-directory: ml-service
+        run: pytest -q

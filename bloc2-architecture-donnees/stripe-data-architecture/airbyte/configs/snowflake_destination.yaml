@@ -1,0 +1,18 @@
+#
+# Airbyte connector configuration — Snowflake destination
+#
+destination:
+  name: stripe-snowflake-destination
+  type: destination-snowflake
+  config:
+    host: ${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com
+    role: LOADER_ROLE
+    warehouse: LOADING
+    database: RAW
+    default_schema: STRIPE
+    username: AIRBYTE_USER
+    credentials:
+      auth_type: Username and Password
+      password: ${SNOWFLAKE_AIRBYTE_PASSWORD}
+    loading_method:
+      method: Internal Staging

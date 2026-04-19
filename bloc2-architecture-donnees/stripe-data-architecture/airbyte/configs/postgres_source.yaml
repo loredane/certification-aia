@@ -1,0 +1,32 @@
+#
+# Airbyte connector configuration — PostgreSQL source
+# A importer via Airbyte UI ou API apres `abctl local install`
+#
+# FIX v3-mediums #10 : ssl_mode.mode: require par defaut (etait: disable).
+# Pour un postgres local-docker SANS TLS (cas demo/dev sur cette repo),
+# override ponctuel en passant ssl_mode.mode: disable dans la UI Airbyte
+# avant de creer la source. Ne JAMAIS laisser disable en prod.
+#
+source:
+  name: stripe-postgres-source
+  type: source-postgres
+  config:
+    host: host.docker.internal
+    port: 5432
+    database: stripe_oltp
+    username: stripe_app
+    password: ${POSTGRES_PASSWORD}
+    schemas:
+      - core
+      - reference
+    replication_method:
+      method: CDC
+      replication_slot: airbyte_slot
+      publication: stripe_publication
+      initial_waiting_seconds: 5
+    ssl_mode:
+      # Defaut secure : require. Override a disable UNIQUEMENT pour la demo
+      # docker-compose locale ou le postgres n'a pas de certificat TLS.
+      mode: require
+    tunnel_method:
+      tunnel_method: NO_TUNNEL

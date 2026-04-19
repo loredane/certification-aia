@@ -1,0 +1,7 @@
+packages:
+  - package: dbt-labs/dbt_utils
+    version: 1.1.1
+  # FIX v3-mediums #18 : dbt-expectations pour des tests de data quality
+  # plus riches que les tests builtin (sum ranges, value ranges, column types...)
+  - package: calogica/dbt_expectations
+    version: 0.10.3

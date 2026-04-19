@@ -1,0 +1,24 @@
+#
+# Airbyte connector configuration — S3 (MinIO) destination
+#
+# FIX v3-mediums #11 : utilise un service account MinIO DEDIE (AIRBYTE_S3_*)
+# avec une policy scoped a stripe-raw/* et stripe-staging/*.
+# Le service minio-init (docker-compose.yml) provisionne automatiquement
+# ce compte au premier lancement (voir .env.example AIRBYTE_S3_ACCESS_KEY /
+# AIRBYTE_S3_SECRET).
+# Avant : access_key_id: ${MINIO_USER} (root MinIO — violait least-privilege).
+#
+destination:
+  name: stripe-s3-destination
+  type: destination-s3
+  config:
+    s3_endpoint: http://minio:9000
+    s3_bucket_name: stripe-raw
+    s3_bucket_path: postgres/
+    s3_bucket_region: us-east-1
+    access_key_id: ${AIRBYTE_S3_ACCESS_KEY}
+    secret_access_key: ${AIRBYTE_S3_SECRET}
+    format:
+      format_type: Parquet
+      compression_codec: SNAPPY
+    file_name_pattern: "${NAMESPACE}/${STREAM_NAME}/${YEAR}/${MONTH}/${DAY}/{date}_{timestamp}_{part_number}{format_extension}"

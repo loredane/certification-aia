@@ -1,49 +1,272 @@
+# =============================================================================
+# Stripe Data Architecture — Docker Compose
+# Stack alignée cursus Jedha Lead Data Science :
+#   • PostgreSQL (OLTP, ACID, 3NF)
+#   • MinIO (S3-compatible Data Lake)
+#   • Snowflake (DWH cloud — référencé via dbt profiles.yml)
+#   • MongoDB (NoSQL - features ML, clickstream, feedback)
+#   • Apache Kafka + Zookeeper (streaming fraud detection)
+#   • Apache Airflow (orchestration)
+#   • dbt (transformations, cible Snowflake)
+#   • FastAPI ML Service (fraud scoring temps réel)
+#   • Prometheus + Grafana (monitoring)
+#
+# Note : Airbyte se lance séparément via `abctl local install`
+# (recommandation officielle Airbyte OSS 2024+)
+#
+# DAMA-DMBOK2 ch.6 — Data Storage and Operations
+# =============================================================================
+
+networks:
+  stripe_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+  mongo_data:
+  zookeeper_data:
+  kafka_data:
+  prometheus_data:
+  grafana_data:
+  airflow_logs:
+  ml_models:
+
 services:
 
-  # ===================== OLTP =====================
+  # ===========================================================================
+  # OLTP — PostgreSQL 16
+  # ===========================================================================
   postgres:
-    image: postgres:16
-    container_name: stripe-postgres
+    image: postgres:16-alpine
+    container_name: stripe_postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-stripe}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stripe_pwd}
       POSTGRES_DB: ${POSTGRES_DB:-stripe_oltp}
-    command:
-      - "postgres"
-      - "-c"
-      - "wal_level=logical"
-      - "-c"
-      - "max_wal_senders=10"
-      - "-c"
-      - "max_replication_slots=10"
+      POSTGRES_USER: ${POSTGRES_USER:-stripe_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    # FIX v3-mediums #12 : bind sur 127.0.0.1 uniquement
+    # (le port est exposé hors du réseau docker seulement pour l'hôte local)
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./docker/postgres/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./docker/postgres/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stripe}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stripe_app} -d ${POSTGRES_DB:-stripe_oltp}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks: [stripe-net]
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    # FIX v3-mediums #13 : hardening (postgres écrit dans un volume, donc
+    # pas de read_only:true, mais on bloque l'escalade de privilèges)
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - stripe_net
 
-  # ===================== STREAMING =====================
+  # ===========================================================================
+  # NoSQL — MongoDB 7
+  # Feature store ML + clickstream + feedback + logs
+  # ===========================================================================
+  mongo:
+    image: mongo:7
+    container_name: stripe_mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-change_me}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-stripe_nosql}
+      # FIX v3-mediums #5 : password du user applicatif injecté par env
+      # (remplace l'ancien hardcode 'change_me_mongo_app' dans init-mongo.js)
+      MONGO_APP_USER: ${MONGO_APP_USER:-stripe_app}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:-change_me_mongo_app_2026}
+    # FIX v3-mediums #12 : bind sur 127.0.0.1 uniquement (pas d'exposition LAN)
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      # FIX v3-mediums #5 : script shell (lit MONGO_APP_PASSWORD) au lieu d'un .js
+      - ./docker/mongo/init-mongo.sh:/docker-entrypoint-initdb.d/init-mongo.sh:ro
+    healthcheck:
+      # FIX v3-hauts: forme CMD-SHELL explicite + grep pour ne pas dépendre
+      # d'une sortie exacte. Corrige le quoting fragile de la forme plain-scalar.
+      test:
+        - CMD-SHELL
+        - "mongosh --quiet --eval 'db.runCommand({ping:1}).ok' | grep -q 1"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # FIX v3-mediums #13 : hardening container (pas de privilege escalation)
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - stripe_net
+
+  mongo-express:
+    # FIX v3-hauts: version pinnée (avant: latest)
+    image: mongo-express:1.0.2-20-alpine3.19
+    container_name: stripe_mongo_express
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_INITDB_ROOT_USERNAME:-admin}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-change_me}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017/
+      # FIX v3-hauts: plus de "admin/admin" hardcodé, password dérivé via env
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USER:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-change_me_mongoexpress_2026}
+    ports:
+      # FIX v3-hauts: bind sur 127.0.0.1 uniquement (pas d'exposition réseau)
+      - "127.0.0.1:8081:8081"
+    networks:
+      - stripe_net
+
+  # ===========================================================================
+  # Data Lake — MinIO (S3-compatible)
+  # Simule le bucket S3 du cours Jedha "ELT with Airbyte"
+  # ===========================================================================
+  minio:
+    # FIX v3-hauts: version pinnée (avant: latest)
+    image: minio/minio:RELEASE.2024-10-29T16-01-48Z
+    container_name: stripe_minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9002:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-change_me}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      # FIX v3: mc CLI n'est PAS dans l'image minio/minio (il est dans minio/mc)
+      # On utilise l'endpoint HTTP /minio/health/live exposé nativement par le serveur
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - stripe_net
+
+  # ===========================================================================
+  # MinIO bucket init — container sidecar one-shot avec image minio/mc
+  # FIX v3: remplace l'usage impossible de mc dans le container MinIO serveur
+  # FIX v3-mediums #11 : en plus des buckets, on crée un service account
+  # Airbyte dédié (AIRBYTE_S3_ACCESS_KEY / AIRBYTE_S3_SECRET) avec une
+  # policy JSON limitée aux buckets stripe-raw/* et stripe-staging/*.
+  # Plus de partage du root user MINIO_USER avec Airbyte.
+  # ===========================================================================
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    container_name: stripe_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_USER: ${MINIO_USER:-minioadmin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-change_me}
+      AIRBYTE_S3_ACCESS_KEY: ${AIRBYTE_S3_ACCESS_KEY:-airbyte_svc}
+      AIRBYTE_S3_SECRET:     ${AIRBYTE_S3_SECRET:-change_me_airbyte_s3_2026}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        echo "Waiting for MinIO to accept connections..."
+        until mc alias set local http://minio:9000 "$$MINIO_USER" "$$MINIO_PASSWORD" >/dev/null 2>&1; do
+          sleep 2
+        done
+
+        echo "Creating buckets (medallion architecture)..."
+        mc mb --ignore-existing local/stripe-raw
+        mc mb --ignore-existing local/stripe-staging
+        mc mb --ignore-existing local/stripe-marts
+        mc mb --ignore-existing local/stripe-archive
+        mc mb --ignore-existing local/ml-artifacts
+
+        echo "Setting retention / versioning on archive (PCI-DSS 7y)..."
+        mc version enable local/stripe-archive || true
+        mc version enable local/stripe-raw     || true
+
+        echo "Creating dedicated Airbyte service account + scoped policy..."
+        cat > /tmp/airbyte-policy.json <<'POLICY'
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+              "Resource": ["arn:aws:s3:::stripe-raw", "arn:aws:s3:::stripe-staging"]
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+              "Resource": ["arn:aws:s3:::stripe-raw/*", "arn:aws:s3:::stripe-staging/*"]
+            }
+          ]
+        }
+        POLICY
+        mc admin policy create local airbyte-scoped /tmp/airbyte-policy.json || \
+          mc admin policy add    local airbyte-scoped /tmp/airbyte-policy.json || true
+
+        # Service account (accessKey/secretKey attachés au policy scoped)
+        # On crée un user interne MinIO pour porter la policy, puis une
+        # access key dérivée. En cas de réexécution, on ignore 'already exists'.
+        mc admin user add local "$$AIRBYTE_S3_ACCESS_KEY" "$$AIRBYTE_S3_SECRET" 2>/dev/null || true
+        mc admin policy attach local airbyte-scoped --user "$$AIRBYTE_S3_ACCESS_KEY" 2>/dev/null || true
+
+        echo "Buckets created:"
+        mc ls local/
+        echo "Service account airbyte-scoped ready (access key: $$AIRBYTE_S3_ACCESS_KEY)"
+        echo "✓ MinIO initialization complete"
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - stripe_net
+
+  # ===========================================================================
+  # Streaming — Zookeeper + Kafka
+  # ===========================================================================
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
-    container_name: stripe-zookeeper
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: stripe_zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-    networks: [stripe-net]
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    healthcheck:
+      # FIX v3-hauts: healthcheck ruok (ZooKeeper four-letter word).
+      # Permet kafka.depends_on.zookeeper.condition: service_healthy.
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - stripe_net
 
   kafka:
-    image: confluentinc/cp-kafka:7.6.0
-    container_name: stripe-kafka
-    depends_on: [zookeeper]
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: stripe_kafka
+    depends_on:
+      # FIX v3-hauts: condition service_healthy (et non short-form sans garantie)
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -53,144 +276,218 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    networks: [stripe-net]
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - stripe_net
 
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: stripe-kafka-ui
-    depends_on: [kafka]
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: stripe_kafka_ui
+    depends_on:
+      # FIX v3-hauts: condition service_healthy
+      kafka:
+        condition: service_healthy
     ports:
-      - "8081:8080"
+      - "8082:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: stripe-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-    networks: [stripe-net]
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - stripe_net
 
-  # ===================== CDC =====================
-  debezium:
-    image: debezium/connect:2.5
-    container_name: stripe-debezium
-    depends_on: [kafka, postgres]
-    ports:
-      - "8083:8083"
-    environment:
-      BOOTSTRAP_SERVERS: kafka:29092
-      GROUP_ID: debezium-connect
-      CONFIG_STORAGE_TOPIC: connect_configs
-      OFFSET_STORAGE_TOPIC: connect_offsets
-      STATUS_STORAGE_TOPIC: connect_statuses
-    networks: [stripe-net]
-
-  # ===================== OLAP =====================
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: stripe-clickhouse
-    ports:
-      - "8123:8123"
-      - "9000:9000"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse/init:/docker-entrypoint-initdb.d
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    networks: [stripe-net]
-
-  # ===================== NoSQL =====================
-  mongodb:
-    image: mongo:7
-    container_name: stripe-mongodb
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-stripe}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-stripe_pwd}
-      MONGO_INITDB_DATABASE: stripe_nosql
-    volumes:
-      - mongodb_data:/data/db
-      - ./mongodb/init:/docker-entrypoint-initdb.d
-    networks: [stripe-net]
-
-  # ===================== ORCHESTRATION =====================
-  airflow:
-    image: apache/airflow:2.8.1
-    container_name: stripe-airflow
-    depends_on: [postgres]
-    ports:
-      - "8080:8080"
+  # ===========================================================================
+  # Orchestration — Apache Airflow 2.9
+  # ===========================================================================
+  airflow-init:
+    # FIX v3: image custom avec dbt-snowflake + providers + requests
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: stripe/airflow-custom:2.9.2
+    container_name: stripe_airflow_init
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-stripe}:${POSTGRES_PASSWORD:-stripe_pwd}@postgres:5432/${POSTGRES_DB:-stripe_oltp}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-stripe_app}:${POSTGRES_PASSWORD:-change_me}@postgres/airflow_meta
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      _AIRFLOW_DB_MIGRATE: "true"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+      _AIRFLOW_DB_UPGRADE: "true"
       _AIRFLOW_WWW_USER_CREATE: "true"
       _AIRFLOW_WWW_USER_USERNAME: airflow
       _AIRFLOW_WWW_USER_PASSWORD: airflow
-    volumes:
-      - ./docker/airflow/dags:/opt/airflow/dags
-    command: bash -c "airflow db migrate && airflow users create --username airflow --firstname A --lastname A --role Admin --email a@a.fr --password airflow || true; airflow standalone"
-    networks: [stripe-net]
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        PGPASSWORD=${POSTGRES_PASSWORD:-change_me} psql -h postgres -U ${POSTGRES_USER:-stripe_app} -d ${POSTGRES_DB:-stripe_oltp} -tc "SELECT 1 FROM pg_database WHERE datname = 'airflow_meta'" | grep -q 1 || PGPASSWORD=${POSTGRES_PASSWORD:-change_me} psql -h postgres -U ${POSTGRES_USER:-stripe_app} -d ${POSTGRES_DB:-stripe_oltp} -c "CREATE DATABASE airflow_meta"
+        airflow db migrate
+        airflow users create --username airflow --password airflow --firstname a --lastname b --role Admin --email airflow@example.com
+    networks:
+      - stripe_net
 
-  # ===================== TRANSFORMATION =====================
-  dbt:
-    image: ghcr.io/dbt-labs/dbt-postgres:1.7.4
-    container_name: stripe-dbt
-    depends_on: [postgres]
-    working_dir: /usr/app/stripe_analytics
-    volumes:
-      - ./dbt/stripe_analytics:/usr/app/stripe_analytics
-      - ./dbt/profiles.yml:/root/.dbt/profiles.yml
-    entrypoint: ["tail", "-f", "/dev/null"]
-    networks: [stripe-net]
-
-  # ===================== GÉNÉRATEUR =====================
-  generator:
-    build: ./generator
-    container_name: stripe-generator
-    depends_on: [postgres]
+  airflow-webserver:
+    image: stripe/airflow-custom:2.9.2
+    # FIX v3: image custom buildée par airflow-init (même Dockerfile)
+    container_name: stripe_airflow_web
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-stripe}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stripe_pwd}
-      POSTGRES_DB: ${POSTGRES_DB:-stripe_oltp}
-    entrypoint: ["tail", "-f", "/dev/null"]
-    networks: [stripe-net]
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-stripe_app}:${POSTGRES_PASSWORD:-change_me}@postgres/airflow_meta
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-change_me}
+      SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+      SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+      SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+      SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-TRANSFORM_ROLE}
+      SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-STRIPE_ANALYTICS}
+      SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:-TRANSFORMING}
+      # FIX v3-hauts: Connection URI Snowflake pour SnowflakeHook (DAG ml_fraud_scoring)
+      AIRFLOW_CONN_SNOWFLAKE_DEFAULT: "snowflake://${SNOWFLAKE_USER}:${SNOWFLAKE_PASSWORD}@${SNOWFLAKE_ACCOUNT}/${SNOWFLAKE_DATABASE:-STRIPE_ANALYTICS}/MARTS?warehouse=${SNOWFLAKE_WAREHOUSE:-TRANSFORMING}&role=${SNOWFLAKE_ROLE:-TRANSFORM_ROLE}"
+      # FIX v3-hauts: Acces MinIO + MongoDB pour le DAG ml_fraud_scoring
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_USER: ${MINIO_USER:-minioadmin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-change_me}
+      MONGO_URI: "mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./dbt:/opt/airflow/dbt
+      - airflow_logs:/opt/airflow/logs
+    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - stripe_net
 
-  # ===================== MONITORING =====================
+  airflow-scheduler:
+    image: stripe/airflow-custom:2.9.2
+    # FIX v3: image custom (même build que airflow-init)
+    container_name: stripe_airflow_scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-stripe_app}:${POSTGRES_PASSWORD:-change_me}@postgres/airflow_meta
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+      # FIX v3-hauts: secret key aussi sur le scheduler (cohérence)
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-change_me}
+      SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+      SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+      SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+      SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-TRANSFORM_ROLE}
+      SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-STRIPE_ANALYTICS}
+      SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:-TRANSFORMING}
+      AIRFLOW_CONN_SNOWFLAKE_DEFAULT: "snowflake://${SNOWFLAKE_USER}:${SNOWFLAKE_PASSWORD}@${SNOWFLAKE_ACCOUNT}/${SNOWFLAKE_DATABASE:-STRIPE_ANALYTICS}/MARTS?warehouse=${SNOWFLAKE_WAREHOUSE:-TRANSFORMING}&role=${SNOWFLAKE_ROLE:-TRANSFORM_ROLE}"
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_USER: ${MINIO_USER:-minioadmin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-change_me}
+      MONGO_URI: "mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./dbt:/opt/airflow/dbt
+      - airflow_logs:/opt/airflow/logs
+    command: scheduler
+    networks:
+      - stripe_net
+
+  # ===========================================================================
+  # ML Service — FastAPI fraud scoring
+  # FIX v3: port externe 8001 (au lieu de 8000) pour libérer 8000 à Airbyte abctl.
+  #          Interne toujours 8000 (pas de breaking change container-to-container).
+  # ===========================================================================
+  ml-service:
+    build: ./ml-service
+    container_name: stripe_ml_service
+    ports:
+      - "8001:8000"
+    environment:
+      MONGO_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017
+      KAFKA_BROKER: kafka:29092
+      # FIX v3-hauts: auth par API key (liste CSV) + flag dev pour demo sans auth
+      ML_API_KEYS: ${ML_API_KEYS:-}
+      ML_DEV_ALLOW_NO_AUTH: ${ML_DEV_ALLOW_NO_AUTH:-1}
+      ML_MODEL_PATH: /app/models/fraud_model.pkl
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # FIX v3-hauts: volume pour charger un modele picklé produit par le DAG ML
+      - ml_models:/app/models:rw
+    depends_on:
+      mongo:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      # FIX v3: healthcheck Compose-level (en plus de celui du Dockerfile)
+      # permet aux autres services d'utiliser condition: service_healthy
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # FIX v3-mediums #13 : hardening container
+    # read_only avec tmpfs pour /tmp (prometheus_client + xgboost écrivent
+    # parfois des fichiers temporaires), cap_drop: ALL (aucun besoin de cap
+    # Linux spécifique), no-new-privileges.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - stripe_net
+
+  # ===========================================================================
+  # Monitoring — Prometheus + Grafana
+  # ===========================================================================
   prometheus:
-    image: prom/prometheus:v2.50.1
-    container_name: stripe-prometheus
+    # FIX v3-hauts: version pinnée (avant: latest)
+    image: prom/prometheus:v2.54.1
+    container_name: stripe_prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
-    networks: [stripe-net]
+    networks:
+      - stripe_net
 
   grafana:
-    image: grafana/grafana:10.4.0
-    container_name: stripe-grafana
+    # FIX v3-hauts: version pinnée (avant: latest)
+    image: grafana/grafana:11.2.0
+    container_name: stripe_grafana
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./docker/grafana/provisioning:/etc/grafana/provisioning
-      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards
-    networks: [stripe-net]
-
-volumes:
-  postgres_data:
-  clickhouse_data:
-  mongodb_data:
-  prometheus_data:
-  grafana_data:
-
-networks:
-  stripe-net:
-    driver: bridge
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - stripe_net

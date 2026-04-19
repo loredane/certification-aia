@@ -1,0 +1,13 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # FIX v3-hauts: uid explicite pour que les dashboards (qui référencent
+    # "uid": "prometheus") trouvent la datasource. Sans ça, Grafana génère
+    # un uid aléatoire à la provision → panels "datasource not found".
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

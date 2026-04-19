@@ -1,0 +1,59 @@
+# =============================================================================
+# FIX v3-mediums #15 : config root pour ruff / black / isort.
+# Evite les divergences de style entre DAGs / ml-service / scripts.
+# Usage :
+#   pip install ruff black isort
+#   ruff check .
+#   black --check .
+#   isort --check-only .
+# =============================================================================
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.venv
+  | dbt_packages
+  | target
+  | logs
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["app", "dags"]
+skip = ["dbt/stripe_analytics/target", "dbt/stripe_analytics/dbt_packages"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "dbt/stripe_analytics/target",
+    "dbt/stripe_analytics/dbt_packages",
+    ".venv",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "E501",  # line too long (black s'en charge)
+    "B008",  # function call in default arg (FastAPI Depends pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"airflow/dags/*.py" = ["E402"]  # imports en bas dans les callables (volontaire)
+
+[tool.pytest.ini_options]
+testpaths = ["ml-service/tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"

@@ -1,0 +1,41 @@
+# =============================================================================
+# Prometheus scrape configuration — Stripe Data Architecture
+#
+# FIX v3-hauts :
+#   - Retiré le job kafka sur kafka:9092 (port broker binaire, PAS HTTP Prom).
+#     Pour exposer les métriques Kafka, il faut attacher l'agent JMX Exporter
+#     à l'image Kafka (voir config/jmx_exporter/ — Phase 2).
+#   - Retiré le job airflow sur /admin/metrics/ (endpoint Airflow 1.x legacy).
+#     Airflow 2.x nécessite statsd_exporter ou le package
+#     airflow-prometheus-exporter (Phase 2).
+#   - Ajouté un job minio exposant les métriques natives MinIO (cluster, S3 API).
+#   - Conservé ml-service (route /metrics implémentée avec prometheus_client).
+# =============================================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'stripe-monitor'
+
+scrape_configs:
+  # --- Prometheus self-monitoring ---
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # --- ML Service (FastAPI + prometheus_client) ---
+  # Port 8000 = port INTERNE du container ml-service (pas 8001 qui est
+  # le port externe host exposé pour la démo curl).
+  - job_name: 'ml-service'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['ml-service:8000']
+
+  # --- MinIO (métriques natives /minio/v2/metrics/cluster) ---
+  - job_name: 'minio-cluster'
+    metrics_path: '/minio/v2/metrics/cluster'
+    scheme: http
+    static_configs:
+      - targets: ['minio:9000']
+
+  # --- Kafka / Airflow : voir note Phase 2 en tête de fichier ---

@@ -1,13 +1,33 @@
 stripe_analytics:
   target: dev
   outputs:
+
+    # -------------------------------------------------------------------------
+    # FIX v3-mediums #9 : dev et prod distincts (avant : schema=MARTS dans
+    # les deux -> risque qu'un dbt run local ecrase le mart de prod).
+    # dev : schema prefixe par le user courant (DBT_ALICE, DBT_BOB, ...).
+    # prod : schema MARTS (pas de prefixe).
+    # -------------------------------------------------------------------------
     dev:
-      type: postgres
-      host: postgres
-      user: stripe
-      password: stripe_pwd
-      port: 5432
-      dbname: stripe_oltp
-      schema: analytics
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'TRANSFORM_ROLE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'STRIPE_ANALYTICS') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'TRANSFORMING') }}"
+      schema: "DBT_{{ (env_var('USER', 'anonymous')) | upper }}"
       threads: 4
-      keepalives_idle: 0
+      client_session_keep_alive: False
+
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'TRANSFORM_ROLE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'STRIPE_ANALYTICS') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'TRANSFORMING') }}"
+      schema: MARTS
+      threads: 8
+      client_session_keep_alive: False

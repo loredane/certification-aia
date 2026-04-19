@@ -1,0 +1,12 @@
+aws_region  = "eu-west-1"
+environment = "dev"
+project     = "stripe"
+
+# FIX v3-hauts: postgres_password SUPPRIMÉ (géré par AWS Secrets Manager).
+# Après terraform apply, récupérer le secret ARN via :
+#   terraform output rds_master_secret_arn
+#   aws secretsmanager get-secret-value --secret-id <arn> --query SecretString --output text
+
+# CIDRs autorisés à se connecter à la RDS (ingress 5432).
+# En prod : remplacer par l'IP privée du VPC workers / bastion uniquement.
+allowed_cidr_blocks_postgres = ["10.0.0.0/8"]

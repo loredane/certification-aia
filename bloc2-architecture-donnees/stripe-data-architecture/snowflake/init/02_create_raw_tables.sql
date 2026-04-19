@@ -1,0 +1,141 @@
+-- =============================================================================
+-- Snowflake — RAW tables structure (for reference)
+-- Ces tables sont normalement créées automatiquement par Airbyte,
+-- mais on les déclare pour documentation et tests sans Airbyte.
+-- =============================================================================
+
+USE ROLE DATA_ENG_ROLE;
+USE DATABASE RAW;
+USE SCHEMA STRIPE;
+
+CREATE TABLE IF NOT EXISTS CUSTOMERS (
+    CUSTOMER_ID            VARCHAR,
+    EMAIL                  VARCHAR,
+    EMAIL_HASH             VARCHAR(64),
+    FIRST_NAME             VARCHAR,
+    LAST_NAME              VARCHAR,
+    COUNTRY_CODE           VARCHAR(2),
+    KYC_STATUS             VARCHAR,
+    RISK_SCORE             NUMBER(5,4),
+    CREATED_AT             TIMESTAMP_NTZ,
+    UPDATED_AT             TIMESTAMP_NTZ,
+    DELETED_AT             TIMESTAMP_NTZ,
+    _AIRBYTE_EXTRACTED_AT  TIMESTAMP_TZ,
+    _AIRBYTE_LOADED_AT     TIMESTAMP_TZ,
+    _AIRBYTE_RAW_ID        VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS MERCHANTS (
+    MERCHANT_ID            VARCHAR,
+    BUSINESS_NAME          VARCHAR,
+    BUSINESS_TYPE          VARCHAR,
+    MCC_CODE               VARCHAR(4),
+    COUNTRY_CODE           VARCHAR(2),
+    STATUS                 VARCHAR,
+    ONBOARDED_AT           TIMESTAMP_NTZ,
+    CREATED_AT             TIMESTAMP_NTZ,
+    UPDATED_AT             TIMESTAMP_NTZ,
+    _AIRBYTE_EXTRACTED_AT  TIMESTAMP_TZ,
+    _AIRBYTE_LOADED_AT     TIMESTAMP_TZ,
+    _AIRBYTE_RAW_ID        VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS PAYMENT_METHODS (
+    PAYMENT_METHOD_ID      VARCHAR,
+    CUSTOMER_ID            VARCHAR,
+    TYPE                   VARCHAR,
+    CARD_BRAND             VARCHAR,
+    LAST4                  VARCHAR(4),
+    EXP_MONTH              NUMBER,
+    EXP_YEAR               NUMBER,
+    TOKEN                  VARCHAR,
+    FINGERPRINT            VARCHAR(64),
+    IS_DEFAULT             BOOLEAN,
+    CREATED_AT             TIMESTAMP_NTZ,
+    DELETED_AT             TIMESTAMP_NTZ,
+    _AIRBYTE_EXTRACTED_AT  TIMESTAMP_TZ,
+    _AIRBYTE_LOADED_AT     TIMESTAMP_TZ,
+    _AIRBYTE_RAW_ID        VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS TRANSACTIONS (
+    TRANSACTION_ID         VARCHAR,
+    MERCHANT_ID            VARCHAR,
+    CUSTOMER_ID            VARCHAR,
+    PAYMENT_METHOD_ID      VARCHAR,
+    AMOUNT                 NUMBER(18,2),
+    CURRENCY_CODE          VARCHAR(3),
+    AMOUNT_USD             NUMBER(18,2),
+    STATUS                 VARCHAR,
+    FAILURE_REASON         VARCHAR,
+    IP_ADDRESS             VARCHAR,
+    USER_AGENT             VARCHAR,
+    DEVICE_TYPE            VARCHAR,
+    FRAUD_SCORE            NUMBER(5,4),
+    IS_3D_SECURE           BOOLEAN,
+    CREATED_AT             TIMESTAMP_NTZ,
+    UPDATED_AT             TIMESTAMP_NTZ,
+    _AIRBYTE_EXTRACTED_AT  TIMESTAMP_TZ,
+    _AIRBYTE_LOADED_AT     TIMESTAMP_TZ,
+    _AIRBYTE_RAW_ID        VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS REFUNDS (
+    REFUND_ID              VARCHAR,
+    TRANSACTION_ID         VARCHAR,
+    AMOUNT                 NUMBER(18,2),
+    REASON                 VARCHAR,
+    STATUS                 VARCHAR,
+    CREATED_AT             TIMESTAMP_NTZ,
+    _AIRBYTE_EXTRACTED_AT  TIMESTAMP_TZ,
+    _AIRBYTE_LOADED_AT     TIMESTAMP_TZ
+);
+
+CREATE TABLE IF NOT EXISTS DISPUTES (
+    DISPUTE_ID             VARCHAR,
+    TRANSACTION_ID         VARCHAR,
+    AMOUNT                 NUMBER(18,2),
+    REASON                 VARCHAR,
+    STATUS                 VARCHAR,
+    EVIDENCE_URL           VARCHAR,
+    CREATED_AT             TIMESTAMP_NTZ,
+    RESOLVED_AT            TIMESTAMP_NTZ,
+    _AIRBYTE_EXTRACTED_AT  TIMESTAMP_TZ,
+    _AIRBYTE_LOADED_AT     TIMESTAMP_TZ
+);
+
+USE SCHEMA REFERENCE;
+
+CREATE TABLE IF NOT EXISTS COUNTRIES (
+    COUNTRY_CODE   VARCHAR(2),
+    COUNTRY_NAME   VARCHAR,
+    REGION         VARCHAR,
+    IS_HIGH_RISK   BOOLEAN,
+    CREATED_AT     TIMESTAMP_NTZ
+);
+
+CREATE TABLE IF NOT EXISTS CURRENCIES (
+    CURRENCY_CODE   VARCHAR(3),
+    CURRENCY_NAME   VARCHAR,
+    DECIMAL_PLACES  NUMBER,
+    CREATED_AT      TIMESTAMP_NTZ
+);
+
+-- FIX v3-mediums #8 : EXCHANGE_RATES avait ni PK ni UNIQUE.
+-- PK sur RATE_ID + UQ logique (FROM_CURRENCY, TO_CURRENCY, EFFECTIVE_DATE)
+-- pour aligner sur le schéma PostgreSQL (docker/postgres/init.sql).
+CREATE TABLE IF NOT EXISTS EXCHANGE_RATES (
+    RATE_ID         NUMBER NOT NULL,
+    FROM_CURRENCY   VARCHAR(3) NOT NULL,
+    TO_CURRENCY     VARCHAR(3) NOT NULL,
+    RATE            NUMBER(18,8) NOT NULL,
+    EFFECTIVE_DATE  DATE NOT NULL,
+    CONSTRAINT PK_EXCHANGE_RATES PRIMARY KEY (RATE_ID),
+    CONSTRAINT UQ_EXCHANGE_RATES UNIQUE (FROM_CURRENCY, TO_CURRENCY, EFFECTIVE_DATE)
+);
+
+CREATE TABLE IF NOT EXISTS MCC_CODES (
+    MCC_CODE        VARCHAR(4),
+    DESCRIPTION     VARCHAR,
+    CATEGORY        VARCHAR
+);
