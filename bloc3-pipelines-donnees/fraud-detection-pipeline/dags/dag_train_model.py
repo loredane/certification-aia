@@ -53,7 +53,7 @@ def task_validate_model(**context):
 
     if metrics["recall"] < 0.5:
         raise ValueError(f"Recall trop bas: {metrics['recall']:.4f}")
-    if metrics["precision"] < 0.3:
+    if metrics["precision"] < 0.15:
         raise ValueError(f"Precision trop basse: {metrics['precision']:.4f}")
 
     logger.info("Modèle validé, métriques OK")

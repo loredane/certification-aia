@@ -96,12 +96,25 @@ def task_generate_report(**context):
 
 
 def task_log_report(**context):
-    """Log l'exécution."""
+    """Log l execution."""
     import psycopg2
+    from datetime import datetime, timezone
     from config.settings import DB_CONFIG
     from src.database.queries import INSERT_PIPELINE_LOG
 
     summary = context["ti"].xcom_pull(key="summary", task_ids="extract_daily_data") or {}
+
+    # Convertir le Proxy execution_date en datetime natif pour psycopg2
+    exec_date = context.get("logical_date") or context.get("execution_date")
+    if hasattr(exec_date, "to_pydatetime"):
+        exec_date = exec_date.to_pydatetime()
+    elif not isinstance(exec_date, datetime):
+        exec_date = datetime.fromisoformat(str(exec_date))
+
+    dag_run = context.get("dag_run")
+    duration = 0
+    if dag_run and dag_run.start_date:
+        duration = int((datetime.now(timezone.utc) - dag_run.start_date).total_seconds())
 
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -109,16 +122,17 @@ def task_log_report(**context):
         cur.execute(INSERT_PIPELINE_LOG, {
             "dag_id": "daily_report",
             "task_id": "full_report",
-            "execution_date": context["execution_date"],
+            "execution_date": exec_date,
             "status": "success",
             "records_processed": summary.get("total_transactions", 0),
             "records_failed": 0,
-            "duration_seconds": 0,
+            "duration_seconds": duration,
             "error_message": None,
         })
         conn.commit()
         cur.close()
         conn.close()
+        logger.info(f"Report log: {summary.get(chr(34)+chr(116)+chr(111)+chr(116)+chr(97)+chr(108)+chr(95)+chr(116)+chr(114)+chr(97)+chr(110)+chr(115)+chr(97)+chr(99)+chr(116)+chr(105)+chr(111)+chr(110)+chr(115)+chr(34), 0)} transactions rapportees, {duration}s")
     except Exception as e:
         logger.error(f"Erreur log: {e}")
 

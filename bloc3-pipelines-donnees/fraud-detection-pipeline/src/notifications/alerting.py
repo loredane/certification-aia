@@ -110,11 +110,14 @@ def send_daily_report(summary, frauds_detail, top_categories):
             is_html=True,
         )
     else:
-        # Pas de SMTP -> on sauvegarde en local
-        path = f"/tmp/fraud_report_{report_date}.html"
+        # Pas de SMTP, on sauvegarde en local dans un dossier accessible
+        import os as _os
+        reports_dir = "/opt/airflow/data/reports"
+        _os.makedirs(reports_dir, exist_ok=True)
+        path = f"{reports_dir}/fraud_report_{report_date}.html"
         with open(path, "w") as f:
             f.write(html)
-        logger.info(f"SMTP pas configuré, rapport sauvé dans {path}")
+        logger.info(f"SMTP non configure, rapport sauve dans {path}")
 
 
 def _send_email(subject, body, recipients, is_html=False):

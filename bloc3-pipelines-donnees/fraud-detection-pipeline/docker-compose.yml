@@ -58,15 +58,9 @@ services:
   # ─── MLflow Tracking Server ────────────────────────────────────
   mlflow:
     image: python:3.10-slim
-    command: >
-      bash -c "pip install mlflow psycopg2-binary &&
-               mlflow server
-               --host 0.0.0.0
-               --port 5000
-               --backend-store-uri postgresql://airflow:airflow@postgres:5432/mlflow
-               --default-artifact-root /mlflow/artifacts"
+    command: bash -c "pip install mlflow==2.17.2 psycopg2-binary && mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://airflow:airflow@postgres:5432/mlflow --default-artifact-root /mlflow/artifacts"
     ports:
-      - "5000:5000"
+      - "5001:5000"
     volumes:
       - mlflow_data:/mlflow/artifacts
     depends_on:

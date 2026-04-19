@@ -152,13 +152,29 @@ def task_notify(**context):
 
 
 def task_log_pipeline(**context):
-    """Enregistre les métriques d'exécution dans pipeline_logs."""
+    """Enregistre les métriques d execution dans pipeline_logs.
+    La duration est calculee depuis le debut du DagRun."""
     import psycopg2
+    from datetime import datetime, timezone
     from config.settings import DB_CONFIG
     from src.database.queries import INSERT_PIPELINE_LOG
 
     extract_count = context["ti"].xcom_pull(key="extract_count", task_ids="extract") or 0
     rejected = context["ti"].xcom_pull(key="rejected_count", task_ids="validate") or 0
+    inserted = context["ti"].xcom_pull(key="inserted_count", task_ids="load") or 0
+
+    # Convertir le Proxy execution_date en datetime natif pour psycopg2
+    exec_date = context.get("logical_date") or context.get("execution_date")
+    if hasattr(exec_date, "to_pydatetime"):
+        exec_date = exec_date.to_pydatetime()
+    elif not isinstance(exec_date, datetime):
+        exec_date = datetime.fromisoformat(str(exec_date))
+
+    # Calculer la duration reelle du run
+    dag_run = context.get("dag_run")
+    duration = 0
+    if dag_run and dag_run.start_date:
+        duration = int((datetime.now(timezone.utc) - dag_run.start_date).total_seconds())
 
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -166,16 +182,17 @@ def task_log_pipeline(**context):
         cur.execute(INSERT_PIPELINE_LOG, {
             "dag_id": "stream_ingest",
             "task_id": "full_pipeline",
-            "execution_date": context["execution_date"],
+            "execution_date": exec_date,
             "status": "success",
             "records_processed": extract_count,
             "records_failed": rejected,
-            "duration_seconds": 0,
+            "duration_seconds": duration,
             "error_message": None,
         })
         conn.commit()
         cur.close()
         conn.close()
+        logger.info(f"Pipeline log: {extract_count} ingerees, {rejected} rejetees, {inserted} inserees, {duration}s")
     except Exception as e:
         logger.error(f"Erreur log pipeline: {e}")
 

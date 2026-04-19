@@ -34,9 +34,10 @@ DAILY_SUMMARY = """
         ROUND(SUM(amt)::numeric, 2) AS total_amount,
         ROUND(SUM(CASE WHEN is_fraud_predicted THEN amt ELSE 0 END)::numeric, 2) AS fraud_amount
     FROM transactions
-    WHERE DATE(ingested_at) = CURRENT_DATE - INTERVAL '1 day'
+    WHERE DATE(ingested_at) = CURRENT_DATE
     GROUP BY DATE(trans_date_trans_time)
-    ORDER BY transaction_date;
+    ORDER BY transaction_date DESC
+    LIMIT 1;
 """
 
 # Liste des fraudes détectées la veille
@@ -46,7 +47,7 @@ DAILY_FRAUDS_DETAIL = """
         amt, city, state, fraud_probability, trans_num
     FROM transactions
     WHERE is_fraud_predicted = TRUE
-      AND DATE(ingested_at) = CURRENT_DATE - INTERVAL '1 day'
+      AND DATE(ingested_at) = CURRENT_DATE
     ORDER BY fraud_probability DESC;
 """
 
@@ -58,7 +59,7 @@ TOP_FRAUD_CATEGORIES = """
         ROUND(AVG(amt)::numeric, 2) AS avg_fraud_amount
     FROM transactions
     WHERE is_fraud_predicted = TRUE
-      AND DATE(ingested_at) = CURRENT_DATE - INTERVAL '1 day'
+      AND DATE(ingested_at) = CURRENT_DATE
     GROUP BY category
     ORDER BY fraud_count DESC
     LIMIT 10;
